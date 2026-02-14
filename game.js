@@ -32,20 +32,21 @@ const ADVANCE      = 4;
 const GAME_OVER    = 5;
 
 // ---- Power-up kinds ----
-const PW = { MULTI: "M", POWER: "P", PIERCE: "X", BIG: "B", SPEED: "S", FLAME: "F", LASER: "L" };
-const PW_COLORS = { M: "#7ec8e3", P: "#f7b731", X: "#a55eea", B: "#26de81", S: "#fd9644", F: "#fc5c65", L: "#45aaf2" };
-const PW_LABELS = { M: "+1 Ball!", P: "Power Up!", X: "Pierce!", B: "Big Ball!", S: "Speed!", F: "Fire Ball!", L: "Laser!" };
-const PW_ICONS  = { M: "+1", P: "POW", X: ">>", B: "BIG", S: "FAST", F: "FIRE", L: "ZAP" };
+const PW = { MULTI: "M", POWER: "P", PIERCE: "X", BIG: "B", SPEED: "S", FLAME: "F", LASER: "L", HINT: "H" };
+const PW_COLORS = { M: "#7ec8e3", P: "#f7b731", X: "#a55eea", B: "#26de81", S: "#fd9644", F: "#fc5c65", L: "#45aaf2", H: "#dfe6e9" };
+const PW_LABELS = { M: "+1 Ball!", P: "+1 Power!", X: "Pierce!", B: "Big Ball!", S: "+Speed!", F: "Fire Ball!", L: "Laser!", H: "+1 Hint!" };
+const PW_ICONS  = { M: "+1", P: "POW", X: ">>", B: "BIG", S: "FAST", F: "FIRE", L: "ZAP", H: "EYE" };
 
 // Weighted power-up selection: MULTI (+1 ball) is much more common
 const PW_WEIGHTS = [
-  { kind: PW.MULTI,  weight: 35 },
-  { kind: PW.POWER,  weight: 15 },
-  { kind: PW.PIERCE, weight: 10 },
-  { kind: PW.BIG,    weight: 12 },
-  { kind: PW.SPEED,  weight: 10 },
-  { kind: PW.FLAME,  weight: 10 },
-  { kind: PW.LASER,  weight: 8  },
+  { kind: PW.MULTI,  weight: 40 },
+  { kind: PW.POWER,  weight: 12 },
+  { kind: PW.PIERCE, weight: 7  },
+  { kind: PW.BIG,    weight: 8  },
+  { kind: PW.SPEED,  weight: 8  },
+  { kind: PW.FLAME,  weight: 7  },
+  { kind: PW.LASER,  weight: 6  },
+  { kind: PW.HINT,   weight: 7  },
 ];
 const PW_TOTAL_WEIGHT = PW_WEIGHTS.reduce((s, w) => s + w.weight, 0);
 
@@ -59,9 +60,10 @@ function randomPowerUp() {
 }
 
 // ---- Block color bands (soft pastels) ----
+// Higher contrast block colors – saturated enough for white text to pop
 const BLOCK_COLORS = [
-  "#70a1d7", "#a1de93", "#f7f48b", "#f4a460",
-  "#f08080", "#ce93d8", "#80cbc4", "#bcaaa4"
+  "#4a90d9", "#5cb85c", "#d4a017", "#e07b39",
+  "#d9534f", "#9b59b6", "#2ea8a8", "#8a7060"
 ];
 
 // ---- Canvas setup ----
@@ -121,6 +123,7 @@ function playTone(freq, dur, vol) {
 function sfxHit()   { playTone(600 + Math.random() * 200, 0.08, 0.10); }
 function sfxBreak() { playTone(900 + Math.random() * 300, 0.14, 0.13); }
 function sfxPower() { playTone(1200, 0.18, 0.10); }
+function sfxLaser() { playTone(200, 0.35, 0.15); }
 
 document.getElementById("muteBtn").addEventListener("click", function() {
   muted = !muted;
@@ -150,7 +153,8 @@ let photons, blocks;
 let fireQueue, fireTimer;
 let firstReturnX, photonsReturned;
 let aimDir, aiming;
-let nextBuffs;
+let nextBuffs;          // one-shot buffs (flame, laser, pierce, big) – reset after firing
+let permUpgrades;       // persistent upgrades (power, speed, hint) – kept forever
 let fadingBlocks;
 
 function initGame() {
@@ -163,6 +167,7 @@ function initGame() {
   blocks = [];
   fadingBlocks = [];
   floatingTexts = [];
+  laserBeam = null;
   fireQueue = 0;
   fireTimer = 0;
   firstReturnX = null;
@@ -170,11 +175,12 @@ function initGame() {
   aimDir = null;
   aiming = false;
   nextBuffs = freshBuffs();
+  permUpgrades = { addDamage: 0, speedMul: 1.0, hintBounces: 2 };
   advanceLevel();
 }
 
 function freshBuffs() {
-  return { addDamage: 0, big: false, speedMul: 1.0, flame: false, laser: false, pierce: 0 };
+  return { big: false, flame: false, laser: false, pierce: 0 };
 }
 
 document.getElementById("restartBtn").addEventListener("click", function() { ensureAudio(); initGame(); });
@@ -313,6 +319,11 @@ if (hasPointerEvents) {
 
 // ---- Firing ----
 function startFiring() {
+  // If laser buff is active, fire instant beam first
+  if (nextBuffs.laser) {
+    fireLaserBeam();
+    nextBuffs.laser = false;
+  }
   phase = FIRING;
   fireQueue = ballCount;
   fireTimer = 0;
@@ -323,7 +334,7 @@ function startFiring() {
 function spawnPhoton() {
   if (photons.length >= MAX_PHOTONS) return;
   var p = photonPool.get();
-  var speedMul = (1 + Math.floor((level - 1) / SPEED_SCALE_INTERVAL) * SPEED_SCALE_AMOUNT) * nextBuffs.speedMul;
+  var speedMul = (1 + Math.floor((level - 1) / SPEED_SCALE_INTERVAL) * SPEED_SCALE_AMOUNT) * permUpgrades.speedMul;
   var spd = PHOTON_SPEED * speedMul;
   p.x = launchX; p.y = LAUNCH_Y;
   p.vx = aimDir.x * spd; p.vy = aimDir.y * spd;
@@ -331,9 +342,9 @@ function spawnPhoton() {
   p.active = true;
   p.returned = false;
   p.returnX = 0;
-  p.damage = 1 + nextBuffs.addDamage;
+  p.damage = 1 + permUpgrades.addDamage;
   p.pierce = nextBuffs.pierce || 0;
-  p.type = nextBuffs.laser ? "laser" : (nextBuffs.flame ? "flame" : "normal");
+  p.type = nextBuffs.flame ? "flame" : "normal";
   photons.push(p);
 }
 
@@ -363,6 +374,12 @@ function updatePhysics(dt) {
 
     // Block collisions
     resolveBlockCollisions(p);
+  }
+
+  // Laser beam fade
+  if (laserBeam) {
+    laserBeam.life -= dt * 2.0;
+    if (laserBeam.life <= 0) laserBeam = null;
   }
 
   // Floating texts
@@ -410,9 +427,6 @@ function resolveBlockCollisions(p) {
       blocks.splice(i, 1);
     }
 
-    // Laser goes through blocks
-    if (p.type === "laser") continue;
-
     // Pierce
     if (p.pierce > 0) { p.pierce--; continue; }
 
@@ -437,16 +451,90 @@ function collectPowerUp(kind, x, y) {
   spawnFloatingText(x, y, label, color);
   switch (kind) {
     case PW.MULTI:  ballCount++; break;
-    case PW.POWER:  nextBuffs.addDamage++; break;
+    case PW.POWER:  permUpgrades.addDamage++; break;           // permanent
+    case PW.SPEED:  permUpgrades.speedMul += 0.1; break;       // permanent +10%
+    case PW.HINT:   permUpgrades.hintBounces++; break;          // permanent +1 trajectory segment
     case PW.PIERCE: nextBuffs.pierce += 2; break;
     case PW.BIG:    nextBuffs.big = true; break;
-    case PW.SPEED:  nextBuffs.speedMul = 1.25; break;
     case PW.FLAME:  nextBuffs.flame = true; break;
     case PW.LASER:  nextBuffs.laser = true; break;
   }
 }
 
 function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
+
+// ---- Laser beam (instant red beam that destroys blocks in path) ----
+var laserBeam = null; // { pts: [{x,y},...], life: 1.0 } when active
+
+function fireLaserBeam() {
+  if (!aimDir) return;
+  sfxLaser();
+  var pts = [{ x: launchX, y: LAUNCH_Y }];
+  var rx = launchX, ry = LAUNCH_Y;
+  var ddx = aimDir.x, ddy = aimDir.y;
+  var maxBounces = 20; // generous max bounces
+
+  for (var bounce = 0; bounce < maxBounces; bounce++) {
+    var minT = Infinity, hitNx = 0, hitNy = 0, hitBlock = null;
+
+    // Walls
+    if (ddx < 0) { var t = (0 - rx) / ddx;     if (t > 0.01 && t < minT) { minT = t; hitNx = 1; hitNy = 0; hitBlock = null; } }
+    if (ddx > 0) { var t = (W - rx) / ddx;      if (t > 0.01 && t < minT) { minT = t; hitNx = -1; hitNy = 0; hitBlock = null; } }
+    if (ddy < 0) { var t = (0 - ry) / ddy;      if (t > 0.01 && t < minT) { minT = t; hitNx = 0; hitNy = 1; hitBlock = null; } }
+    if (ddy > 0) { var t = (LAUNCH_Y + 20 - ry) / ddy; if (t > 0.01 && t < minT) { minT = t; hitNx = 0; hitNy = -1; hitBlock = null; } }
+
+    // Blocks — find closest block intersection (ray vs AABB, no inflation for beam)
+    for (var j = 0; j < blocks.length; j++) {
+      var b = blocks[j];
+      if (!b.alive) continue;
+      var t = rayAABB(rx, ry, ddx, ddy, b.x, b.y, b.x + b.w, b.y + b.h);
+      if (t !== null && t > 0.01 && t < minT) {
+        minT = t;
+        // Determine which face we hit for wall-bounce normal
+        var hx = rx + ddx * t, hy = ry + ddy * t;
+        var bcx = b.x + b.w / 2, bcy = b.y + b.h / 2;
+        var ex = b.w / 2, ey = b.h / 2;
+        var ppx = (hx - bcx) / ex, ppy = (hy - bcy) / ey;
+        if (Math.abs(ppx) > Math.abs(ppy)) { hitNx = ppx > 0 ? 1 : -1; hitNy = 0; }
+        else { hitNx = 0; hitNy = ppy > 0 ? 1 : -1; }
+        hitBlock = b;
+      }
+    }
+
+    if (minT === Infinity || minT > 2000) { minT = 2000; }
+    var nx = rx + ddx * minT, ny = ry + ddy * minT;
+    pts.push({ x: nx, y: ny });
+    rx = nx; ry = ny;
+
+    // If we hit a block, destroy it and continue through (no bounce off blocks)
+    if (hitBlock) {
+      hitBlock.alive = false;
+      hitBlock.hp = 0;
+      score += 6;
+      sfxBreak();
+      fadingBlocks.push({ x: hitBlock.x, y: hitBlock.y, w: hitBlock.w, h: hitBlock.h, color: blockColor(hitBlock.maxHp), fade: 1 });
+      if (hitBlock.power) {
+        collectPowerUp(hitBlock.power, hitBlock.x + hitBlock.w / 2, hitBlock.y + hitBlock.h / 2);
+      }
+      // Remove from blocks array
+      for (var k = blocks.length - 1; k >= 0; k--) {
+        if (blocks[k] === hitBlock) { blocks.splice(k, 1); break; }
+      }
+      // Continue in same direction (beam passes through blocks)
+      continue;
+    }
+
+    // Hit a wall — reflect off it
+    var dot = ddx * hitNx + ddy * hitNy;
+    ddx -= 2 * dot * hitNx;
+    ddy -= 2 * dot * hitNy;
+
+    // If we hit the bottom wall, stop the beam
+    if (ny >= LAUNCH_Y + 15) break;
+  }
+
+  laserBeam = { pts: pts, life: 1.0 };
+}
 
 // ---- Trajectory preview (raycast) ----
 function trajectoryPreview() {
@@ -456,7 +544,8 @@ function trajectoryPreview() {
   var ddx = aimDir.x, ddy = aimDir.y;
   var r = PHOTON_R;
 
-  for (var seg = 0; seg < 2; seg++) {
+  var maxSegs = permUpgrades ? permUpgrades.hintBounces : 2;
+  for (var seg = 0; seg < maxSegs; seg++) {
     var minT = Infinity, hitNx = 0, hitNy = 0;
 
     // Walls
@@ -527,7 +616,7 @@ function render() {
   for (var i = 0; i < blocks.length; i++) {
     var b = blocks[i];
     if (!b.alive) continue;
-    var opacity = 0.5 + 0.5 * (b.hp / b.maxHp);
+    var opacity = 0.65 + 0.35 * (b.hp / b.maxHp);
 
     if (b.power) {
       // Power-up blocks: colored pulsing border + icon label
@@ -545,22 +634,28 @@ function render() {
       ctx.textAlign = "left";
       ctx.textBaseline = "middle";
       ctx.fillText(PW_ICONS[b.power], b.x + 3, b.y + b.h / 2);
-      // HP on right
-      ctx.fillStyle = "#fff";
-      ctx.font = "bold 11px 'Segoe UI', system-ui, sans-serif";
+      // HP on right – with dark outline for readability
+      ctx.font = "bold 12px 'Segoe UI', system-ui, sans-serif";
       ctx.textAlign = "right";
       ctx.textBaseline = "middle";
+      ctx.strokeStyle = "rgba(0,0,0,0.5)";
+      ctx.lineWidth = 2.5;
+      ctx.strokeText(b.hp, b.x + b.w - 4, b.y + b.h / 2);
+      ctx.fillStyle = "#fff";
       ctx.fillText(b.hp, b.x + b.w - 4, b.y + b.h / 2);
     } else {
       // Normal block
       ctx.globalAlpha = opacity;
       drawRoundRect(b.x, b.y, b.w, b.h, 4, blockColor(b.hp));
       ctx.globalAlpha = 1;
-      // HP text centered
-      ctx.fillStyle = "#fff";
-      ctx.font = "bold 11px 'Segoe UI', system-ui, sans-serif";
+      // HP text centered – with dark outline for readability
+      ctx.font = "bold 12px 'Segoe UI', system-ui, sans-serif";
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
+      ctx.strokeStyle = "rgba(0,0,0,0.5)";
+      ctx.lineWidth = 2.5;
+      ctx.strokeText(b.hp, b.x + b.w / 2, b.y + b.h / 2);
+      ctx.fillStyle = "#fff";
       ctx.fillText(b.hp, b.x + b.w / 2, b.y + b.h / 2);
     }
   }
@@ -571,16 +666,55 @@ function render() {
     if (!p.active) continue;
     // Halo
     ctx.globalAlpha = 0.15;
-    ctx.fillStyle = p.type === "flame" ? "#fc5c65" : (p.type === "laser" ? "#45aaf2" : "#b8e6ff");
+    ctx.fillStyle = p.type === "flame" ? "#fc5c65" : "#b8e6ff";
     ctx.beginPath();
     ctx.arc(p.x, p.y, p.r * 2.5, 0, Math.PI * 2);
     ctx.fill();
     // Core
     ctx.globalAlpha = 1;
-    ctx.fillStyle = p.type === "flame" ? "#ff7675" : (p.type === "laser" ? "#74b9ff" : "#e8f8ff");
+    ctx.fillStyle = p.type === "flame" ? "#ff7675" : "#e8f8ff";
     ctx.beginPath();
     ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
     ctx.fill();
+  }
+
+  // Laser beam (solid red line that fades out)
+  if (laserBeam && laserBeam.life > 0) {
+    var lbAlpha = laserBeam.life;
+    // Outer glow
+    ctx.globalAlpha = lbAlpha * 0.3;
+    ctx.strokeStyle = "#ff0000";
+    ctx.lineWidth = 8;
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
+    ctx.setLineDash([]);
+    ctx.beginPath();
+    for (var i = 0; i < laserBeam.pts.length; i++) {
+      if (i === 0) ctx.moveTo(laserBeam.pts[i].x, laserBeam.pts[i].y);
+      else ctx.lineTo(laserBeam.pts[i].x, laserBeam.pts[i].y);
+    }
+    ctx.stroke();
+    // Core beam
+    ctx.globalAlpha = lbAlpha * 0.9;
+    ctx.strokeStyle = "#ff4444";
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    for (var i = 0; i < laserBeam.pts.length; i++) {
+      if (i === 0) ctx.moveTo(laserBeam.pts[i].x, laserBeam.pts[i].y);
+      else ctx.lineTo(laserBeam.pts[i].x, laserBeam.pts[i].y);
+    }
+    ctx.stroke();
+    // Bright center
+    ctx.globalAlpha = lbAlpha;
+    ctx.strokeStyle = "#ffaaaa";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (var i = 0; i < laserBeam.pts.length; i++) {
+      if (i === 0) ctx.moveTo(laserBeam.pts[i].x, laserBeam.pts[i].y);
+      else ctx.lineTo(laserBeam.pts[i].x, laserBeam.pts[i].y);
+    }
+    ctx.stroke();
+    ctx.globalAlpha = 1;
   }
 
   // Floating text popups
@@ -629,14 +763,23 @@ function render() {
   ctx.textAlign = "left";
   ctx.fillText("Balls: " + ballCount, 10, 30);
 
-  // Active buffs indicator
+  // Persistent upgrades line
+  var permTexts = [];
+  if (permUpgrades.addDamage > 0) permTexts.push("Dmg+" + permUpgrades.addDamage);
+  if (permUpgrades.speedMul > 1.0) permTexts.push("Spd+" + Math.round((permUpgrades.speedMul - 1) * 100) + "%");
+  if (permUpgrades.hintBounces > 2) permTexts.push("Hint+" + (permUpgrades.hintBounces - 2));
+  if (permTexts.length) {
+    ctx.textAlign = "center";
+    ctx.font = "10px sans-serif";
+    ctx.fillStyle = "rgba(180,220,255,0.6)";
+    ctx.fillText(permTexts.join("  "), W / 2, H - 28);
+  }
+  // One-shot buffs indicator
   var buffTexts = [];
-  if (nextBuffs.addDamage > 0) buffTexts.push("Power Up");
   if (nextBuffs.big) buffTexts.push("Big Ball");
   if (nextBuffs.flame) buffTexts.push("Fire Ball");
   if (nextBuffs.laser) buffTexts.push("Laser");
   if (nextBuffs.pierce > 0) buffTexts.push("Pierce");
-  if (nextBuffs.speedMul > 1) buffTexts.push("Speed");
   if (buffTexts.length) {
     ctx.textAlign = "center";
     ctx.font = "11px sans-serif";
@@ -721,7 +864,11 @@ function loop(timestamp) {
       break;
 
     default:
-      // Update floating texts even during AIMING
+      // Update floating texts and laser beam even during AIMING
+      if (laserBeam) {
+        laserBeam.life -= dt * 2.0;
+        if (laserBeam.life <= 0) laserBeam = null;
+      }
       for (var i = floatingTexts.length - 1; i >= 0; i--) {
         floatingTexts[i].y -= dt * 40;
         floatingTexts[i].life -= dt * 1.2;
