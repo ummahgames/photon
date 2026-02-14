@@ -246,11 +246,10 @@ function advanceLevel() {
 function randInt(lo, hi) { return lo + Math.floor(Math.random() * (hi - lo + 1)); }
 
 // ---- Input ----
-// Trajectory follows mouse/touch movement at all times during AIMING (no drag required).
-// A single click/tap fires using the current aim direction.
-// Works with both mouse and touch via Pointer Events, with touch fallback.
+// Mouse: trajectory follows cursor at all times, click to fire.
+// Touch: hold to aim (trajectory follows finger), release to fire.
 var mouseVirtX = W / 2, mouseVirtY = 0;
-var hasPointerEvents = !!window.PointerEvent;
+var touchDragging = false;  // true while a touch is held down
 
 function updateAimFromPointer(px, py) {
   var p = toVirtual(px, py);
@@ -267,55 +266,52 @@ function updateAimFromPointer(px, py) {
   }
 }
 
-function handleMove(px, py) {
+// --- Mouse input (trajectory always follows, click fires) ---
+canvas.addEventListener("mousemove", function(e) {
   if (phase === AIMING) {
-    updateAimFromPointer(px, py);
+    updateAimFromPointer(e.clientX, e.clientY);
   }
-}
-
-function handleDown(px, py) {
+});
+canvas.addEventListener("mousedown", function(e) {
   ensureAudio();
   if (phase === GAME_OVER) { initGame(); return; }
   if (phase !== AIMING) return;
-  updateAimFromPointer(px, py);
+  updateAimFromPointer(e.clientX, e.clientY);
   if (aiming && aimDir) {
     startFiring();
   }
-}
+});
 
-if (hasPointerEvents) {
-  canvas.addEventListener("pointermove", function(e) {
-    e.preventDefault();
-    handleMove(e.clientX, e.clientY);
-  }, { passive: false });
-  canvas.addEventListener("pointerdown", function(e) {
-    e.preventDefault();
-    handleDown(e.clientX, e.clientY);
-  }, { passive: false });
-} else {
-  // Fallback: mouse events
-  canvas.addEventListener("mousemove", function(e) {
-    handleMove(e.clientX, e.clientY);
-  });
-  canvas.addEventListener("mousedown", function(e) {
-    handleDown(e.clientX, e.clientY);
-  });
-  // Fallback: touch events
-  canvas.addEventListener("touchmove", function(e) {
-    e.preventDefault();
-    if (e.touches.length > 0) {
-      handleMove(e.touches[0].clientX, e.touches[0].clientY);
-    }
-  }, { passive: false });
-  canvas.addEventListener("touchstart", function(e) {
-    e.preventDefault();
-    if (e.touches.length > 0) {
-      // Update aim then fire
-      handleMove(e.touches[0].clientX, e.touches[0].clientY);
-      handleDown(e.touches[0].clientX, e.touches[0].clientY);
-    }
-  }, { passive: false });
-}
+// --- Touch input (hold to aim, drag to adjust, release to fire) ---
+canvas.addEventListener("touchstart", function(e) {
+  e.preventDefault();
+  ensureAudio();
+  if (phase === GAME_OVER) { initGame(); return; }
+  if (phase !== AIMING) return;
+  touchDragging = true;
+  if (e.touches.length > 0) {
+    updateAimFromPointer(e.touches[0].clientX, e.touches[0].clientY);
+  }
+}, { passive: false });
+
+canvas.addEventListener("touchmove", function(e) {
+  e.preventDefault();
+  if (touchDragging && phase === AIMING && e.touches.length > 0) {
+    updateAimFromPointer(e.touches[0].clientX, e.touches[0].clientY);
+  }
+}, { passive: false });
+
+canvas.addEventListener("touchend", function(e) {
+  e.preventDefault();
+  if (touchDragging && phase === AIMING && aiming && aimDir) {
+    startFiring();
+  }
+  touchDragging = false;
+}, { passive: false });
+
+canvas.addEventListener("touchcancel", function(e) {
+  touchDragging = false;
+}, { passive: false });
 
 // ---- Firing ----
 function startFiring() {
