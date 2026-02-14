@@ -19,7 +19,7 @@ const FIRE_INTERVAL = 0.065;                   // seconds between sequential lau
 const PHYSICS_DT  = 1 / 120;
 const MAX_PHOTONS = 60;
 const BLOCK_SPAWN_CHANCE = 0.65;
-const POWERUP_CHANCE     = 0.12;
+const POWERUP_CHANCE     = 0.18;               // slightly higher chance
 const SPEED_SCALE_INTERVAL = 10;               // every N levels, slight speed bump
 const SPEED_SCALE_AMOUNT   = 0.04;
 
@@ -34,7 +34,29 @@ const GAME_OVER    = 5;
 // ---- Power-up kinds ----
 const PW = { MULTI: "M", POWER: "P", PIERCE: "X", BIG: "B", SPEED: "S", FLAME: "F", LASER: "L" };
 const PW_COLORS = { M: "#7ec8e3", P: "#f7b731", X: "#a55eea", B: "#26de81", S: "#fd9644", F: "#fc5c65", L: "#45aaf2" };
-const PW_LABELS = { M: "+Ball", P: "+Dmg", X: "Pierce", B: "Big", S: "Speed", F: "Flame", L: "Laser" };
+const PW_LABELS = { M: "+1 Ball!", P: "Power Up!", X: "Pierce!", B: "Big Ball!", S: "Speed!", F: "Fire Ball!", L: "Laser!" };
+const PW_ICONS  = { M: "+1", P: "POW", X: ">>", B: "BIG", S: "FAST", F: "FIRE", L: "ZAP" };
+
+// Weighted power-up selection: MULTI (+1 ball) is much more common
+const PW_WEIGHTS = [
+  { kind: PW.MULTI,  weight: 35 },
+  { kind: PW.POWER,  weight: 15 },
+  { kind: PW.PIERCE, weight: 10 },
+  { kind: PW.BIG,    weight: 12 },
+  { kind: PW.SPEED,  weight: 10 },
+  { kind: PW.FLAME,  weight: 10 },
+  { kind: PW.LASER,  weight: 8  },
+];
+const PW_TOTAL_WEIGHT = PW_WEIGHTS.reduce((s, w) => s + w.weight, 0);
+
+function randomPowerUp() {
+  let r = Math.random() * PW_TOTAL_WEIGHT;
+  for (const pw of PW_WEIGHTS) {
+    r -= pw.weight;
+    if (r <= 0) return pw.kind;
+  }
+  return PW.MULTI;
+}
 
 // ---- Block color bands (soft pastels) ----
 const BLOCK_COLORS = [
@@ -68,51 +90,68 @@ function toVirtual(px, py) {
 
 // ---- Audio ----
 let audioCtx = null, muted = false;
-function ensureAudio() { if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)(); }
+function ensureAudio() {
+  if (!audioCtx) {
+    try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); }
+    catch (e) { /* Audio not supported */ }
+  }
+  // Resume suspended context (required by iOS Safari)
+  if (audioCtx && audioCtx.state === "suspended") {
+    audioCtx.resume();
+  }
+}
 let lastSoundTime = 0;
 function playTone(freq, dur, vol) {
   if (muted || !audioCtx) return;
   const now = audioCtx.currentTime;
   if (now - lastSoundTime < 0.025) return;      // throttle
   lastSoundTime = now;
-  const osc = audioCtx.createOscillator();
-  const gain = audioCtx.createGain();
-  osc.type = "triangle";
-  osc.frequency.value = freq;
-  gain.gain.setValueAtTime(vol, now);
-  gain.gain.exponentialRampToValueAtTime(0.001, now + dur);
-  osc.connect(gain).connect(audioCtx.destination);
-  osc.start(now);
-  osc.stop(now + dur);
+  try {
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = "triangle";
+    osc.frequency.value = freq;
+    gain.gain.setValueAtTime(vol, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + dur);
+    osc.connect(gain).connect(audioCtx.destination);
+    osc.start(now);
+    osc.stop(now + dur);
+  } catch (e) { /* ignore audio errors */ }
 }
 function sfxHit()   { playTone(600 + Math.random() * 200, 0.08, 0.10); }
 function sfxBreak() { playTone(900 + Math.random() * 300, 0.14, 0.13); }
 function sfxPower() { playTone(1200, 0.18, 0.10); }
 
-document.getElementById("muteBtn").addEventListener("click", () => {
+document.getElementById("muteBtn").addEventListener("click", function() {
   muted = !muted;
   document.getElementById("muteBtn").textContent = muted ? "Unmute" : "Mute";
 });
 
 // ---- Object pools ----
 function makePool(factory) {
-  const pool = [];
+  var pool = [];
   return {
-    get()     { return pool.length ? pool.pop() : factory(); },
-    release(o){ pool.push(o); }
+    get: function()  { return pool.length ? pool.pop() : factory(); },
+    release: function(o) { pool.push(o); }
   };
 }
-const photonPool = makePool(() => ({ x:0,y:0,vx:0,vy:0,r:PHOTON_R,active:false,returned:false,returnX:0,damage:1,pierce:0,type:"normal" }));
-const dropPool   = makePool(() => ({ x:0,y:0,vy:0,kind:"",active:false }));
+const photonPool = makePool(function() { return { x:0,y:0,vx:0,vy:0,r:PHOTON_R,active:false,returned:false,returnX:0,damage:1,pierce:0,type:"normal" }; });
+
+// ---- Floating text popups ----
+let floatingTexts = [];
+
+function spawnFloatingText(x, y, text, color) {
+  floatingTexts.push({ x: x, y: y, text: text, color: color, life: 1.0 });
+}
 
 // ---- Game state ----
 let phase, level, score, ballCount, launchX;
-let photons, drops, blocks;        // arrays
+let photons, blocks;
 let fireQueue, fireTimer;
 let firstReturnX, photonsReturned;
-let aimDir, aiming;                // aiming
+let aimDir, aiming;
 let nextBuffs;
-let fadingBlocks;                  // for gentle fade-out
+let fadingBlocks;
 
 function initGame() {
   phase = AIMING;
@@ -121,9 +160,9 @@ function initGame() {
   ballCount = 1;
   launchX = W / 2;
   photons = [];
-  drops = [];
   blocks = [];
   fadingBlocks = [];
+  floatingTexts = [];
   fireQueue = 0;
   fireTimer = 0;
   firstReturnX = null;
@@ -138,7 +177,7 @@ function freshBuffs() {
   return { addDamage: 0, big: false, speedMul: 1.0, flame: false, laser: false, pierce: 0 };
 }
 
-document.getElementById("restartBtn").addEventListener("click", () => { ensureAudio(); initGame(); });
+document.getElementById("restartBtn").addEventListener("click", function() { ensureAudio(); initGame(); });
 
 // ---- Block helpers ----
 function blockX(col) { return col * CELL_W + BLOCK_PAD; }
@@ -147,7 +186,7 @@ function blockW()    { return CELL_W - BLOCK_PAD * 2; }
 function blockH()    { return CELL_H - BLOCK_PAD * 2; }
 
 function makeBlock(row, col, hp, power) {
-  return { row, col, x: blockX(col), y: blockY(row), w: blockW(), h: blockH(), hp, maxHp: hp, power, alive: true };
+  return { row: row, col: col, x: blockX(col), y: blockY(row), w: blockW(), h: blockH(), hp: hp, maxHp: hp, power: power, alive: true };
 }
 
 function blockColor(hp) { return BLOCK_COLORS[(hp - 1) % BLOCK_COLORS.length]; }
@@ -156,24 +195,24 @@ function blockColor(hp) { return BLOCK_COLORS[(hp - 1) % BLOCK_COLORS.length]; }
 function advanceLevel() {
   level++;
   // Shift existing blocks down
-  for (let i = blocks.length - 1; i >= 0; i--) {
-    const b = blocks[i];
+  for (var i = blocks.length - 1; i >= 0; i--) {
+    var b = blocks[i];
     b.row++;
     b.y = blockY(b.row);
-    // Game over check
     if (b.y + b.h > H - BAND_H) { phase = GAME_OVER; return; }
   }
   // Spawn new row (row 0)
-  let spawned = 0;
-  for (let c = 0; c < GRID_COLS; c++) {
+  var spawned = 0;
+  var hasPowerUp = false;
+  for (var c = 0; c < GRID_COLS; c++) {
     if (Math.random() < BLOCK_SPAWN_CHANCE) {
-      let hp;
+      var hp;
       if (level <= 5) hp = level;
       else hp = randInt(Math.max(1, level - 2), level);
-      let power = null;
+      var power = null;
       if (Math.random() < POWERUP_CHANCE) {
-        const kinds = Object.values(PW);
-        power = kinds[randInt(0, kinds.length - 1)];
+        power = randomPowerUp();
+        hasPowerUp = true;
       }
       blocks.push(makeBlock(0, c, hp, power));
       spawned++;
@@ -181,16 +220,18 @@ function advanceLevel() {
   }
   // Ensure at least 1 block
   if (spawned === 0) {
-    const c = randInt(0, GRID_COLS - 1);
-    let hp = level <= 5 ? level : randInt(Math.max(1, level - 2), level);
-    blocks.push(makeBlock(0, c, hp, null));
+    var rc = randInt(0, GRID_COLS - 1);
+    var rhp = level <= 5 ? level : randInt(Math.max(1, level - 2), level);
+    blocks.push(makeBlock(0, rc, rhp, null));
   }
-  // Guarantee a power-up every 3 levels early on
-  if (level % 3 === 0) {
-    const row0 = blocks.filter(b => b.row === 0 && !b.power);
+  // Guarantee a power-up every 2 levels, biased toward +1 ball
+  if (!hasPowerUp && level % 2 === 0) {
+    var row0 = [];
+    for (var j = 0; j < blocks.length; j++) {
+      if (blocks[j].row === 0 && !blocks[j].power) row0.push(blocks[j]);
+    }
     if (row0.length) {
-      const kinds = Object.values(PW);
-      row0[randInt(0, row0.length - 1)].power = kinds[randInt(0, kinds.length - 1)];
+      row0[randInt(0, row0.length - 1)].power = Math.random() < 0.5 ? PW.MULTI : randomPowerUp();
     }
   }
   phase = AIMING;
@@ -199,42 +240,76 @@ function advanceLevel() {
 function randInt(lo, hi) { return lo + Math.floor(Math.random() * (hi - lo + 1)); }
 
 // ---- Input ----
-let pointerDown = false, pointerX = 0, pointerY = 0;
+// Trajectory follows mouse/touch movement at all times during AIMING (no drag required).
+// A single click/tap fires using the current aim direction.
+// Works with both mouse and touch via Pointer Events, with touch fallback.
+var mouseVirtX = W / 2, mouseVirtY = 0;
+var hasPointerEvents = !!window.PointerEvent;
 
-canvas.addEventListener("pointerdown", e => {
-  ensureAudio();
-  const p = toVirtual(e.clientX, e.clientY);
-  if (phase === GAME_OVER) { initGame(); return; }
-  if (phase !== AIMING) return;
-  if (p.y < LAUNCH_Y - 80) return;             // must start in lower area
-  pointerDown = true;
-  pointerX = p.x; pointerY = p.y;
-});
-
-canvas.addEventListener("pointermove", e => {
-  if (!pointerDown) return;
-  const p = toVirtual(e.clientX, e.clientY);
-  pointerX = p.x; pointerY = p.y;
-  // Compute aim direction (must aim upward)
-  const dx = pointerX - launchX, dy = pointerY - LAUNCH_Y;
+function updateAimFromPointer(px, py) {
+  var p = toVirtual(px, py);
+  mouseVirtX = p.x;
+  mouseVirtY = p.y;
+  var dx = mouseVirtX - launchX, dy = mouseVirtY - LAUNCH_Y;
   if (dy < -10) {
-    const len = Math.hypot(dx, dy);
+    var len = Math.hypot(dx, dy);
     aimDir = { x: dx / len, y: dy / len };
     aiming = true;
   } else {
     aiming = false;
     aimDir = null;
   }
-});
+}
 
-canvas.addEventListener("pointerup", () => {
-  if (!pointerDown) return;
-  pointerDown = false;
-  if (phase === AIMING && aiming && aimDir) {
+function handleMove(px, py) {
+  if (phase === AIMING) {
+    updateAimFromPointer(px, py);
+  }
+}
+
+function handleDown(px, py) {
+  ensureAudio();
+  if (phase === GAME_OVER) { initGame(); return; }
+  if (phase !== AIMING) return;
+  updateAimFromPointer(px, py);
+  if (aiming && aimDir) {
     startFiring();
   }
-  aiming = false;
-});
+}
+
+if (hasPointerEvents) {
+  canvas.addEventListener("pointermove", function(e) {
+    e.preventDefault();
+    handleMove(e.clientX, e.clientY);
+  }, { passive: false });
+  canvas.addEventListener("pointerdown", function(e) {
+    e.preventDefault();
+    handleDown(e.clientX, e.clientY);
+  }, { passive: false });
+} else {
+  // Fallback: mouse events
+  canvas.addEventListener("mousemove", function(e) {
+    handleMove(e.clientX, e.clientY);
+  });
+  canvas.addEventListener("mousedown", function(e) {
+    handleDown(e.clientX, e.clientY);
+  });
+  // Fallback: touch events
+  canvas.addEventListener("touchmove", function(e) {
+    e.preventDefault();
+    if (e.touches.length > 0) {
+      handleMove(e.touches[0].clientX, e.touches[0].clientY);
+    }
+  }, { passive: false });
+  canvas.addEventListener("touchstart", function(e) {
+    e.preventDefault();
+    if (e.touches.length > 0) {
+      // Update aim then fire
+      handleMove(e.touches[0].clientX, e.touches[0].clientY);
+      handleDown(e.touches[0].clientX, e.touches[0].clientY);
+    }
+  }, { passive: false });
+}
 
 // ---- Firing ----
 function startFiring() {
@@ -247,9 +322,9 @@ function startFiring() {
 
 function spawnPhoton() {
   if (photons.length >= MAX_PHOTONS) return;
-  const p = photonPool.get();
-  const speedMul = (1 + Math.floor((level - 1) / SPEED_SCALE_INTERVAL) * SPEED_SCALE_AMOUNT) * nextBuffs.speedMul;
-  const spd = PHOTON_SPEED * speedMul;
+  var p = photonPool.get();
+  var speedMul = (1 + Math.floor((level - 1) / SPEED_SCALE_INTERVAL) * SPEED_SCALE_AMOUNT) * nextBuffs.speedMul;
+  var spd = PHOTON_SPEED * speedMul;
   p.x = launchX; p.y = LAUNCH_Y;
   p.vx = aimDir.x * spd; p.vy = aimDir.y * spd;
   p.r = nextBuffs.big ? PHOTON_R * 1.8 : PHOTON_R;
@@ -265,8 +340,8 @@ function spawnPhoton() {
 // ---- Physics ----
 function updatePhysics(dt) {
   // Photons
-  for (let i = photons.length - 1; i >= 0; i--) {
-    const p = photons[i];
+  for (var i = photons.length - 1; i >= 0; i--) {
+    var p = photons[i];
     if (!p.active) continue;
     p.x += p.vx * dt;
     p.y += p.vy * dt;
@@ -290,45 +365,35 @@ function updatePhysics(dt) {
     resolveBlockCollisions(p);
   }
 
-  // Drops
-  for (let i = drops.length - 1; i >= 0; i--) {
-    const d = drops[i];
-    if (!d.active) continue;
-    d.y += d.vy * dt;
-    if (d.y > H) { d.active = false; dropPool.release(d); drops.splice(i, 1); continue; }
-    // Check photon collect
-    for (const p of photons) {
-      if (!p.active) continue;
-      if (Math.hypot(p.x - d.x, p.y - d.y) < p.r + 10) {
-        collectPowerUp(d.kind);
-        d.active = false; dropPool.release(d); drops.splice(i, 1);
-        break;
-      }
-    }
+  // Floating texts
+  for (var i = floatingTexts.length - 1; i >= 0; i--) {
+    var ft = floatingTexts[i];
+    ft.y -= dt * 40;
+    ft.life -= dt * 1.2;
+    if (ft.life <= 0) floatingTexts.splice(i, 1);
   }
 
   // Fading blocks
-  for (let i = fadingBlocks.length - 1; i >= 0; i--) {
+  for (var i = fadingBlocks.length - 1; i >= 0; i--) {
     fadingBlocks[i].fade -= dt * 3;
     if (fadingBlocks[i].fade <= 0) fadingBlocks.splice(i, 1);
   }
 }
 
 function resolveBlockCollisions(p) {
-  const nearCols = [Math.floor((p.x - p.r) / CELL_W), Math.floor((p.x + p.r) / CELL_W)];
-  for (let i = blocks.length - 1; i >= 0; i--) {
-    const b = blocks[i];
+  for (var i = blocks.length - 1; i >= 0; i--) {
+    var b = blocks[i];
     if (!b.alive) continue;
 
     // Circle vs AABB
-    const cx = clamp(p.x, b.x, b.x + b.w);
-    const cy = clamp(p.y, b.y, b.y + b.h);
-    const dx = p.x - cx, dy = p.y - cy;
-    const dist2 = dx * dx + dy * dy;
+    var cx = clamp(p.x, b.x, b.x + b.w);
+    var cy = clamp(p.y, b.y, b.y + b.h);
+    var dx = p.x - cx, dy = p.y - cy;
+    var dist2 = dx * dx + dy * dy;
     if (dist2 >= p.r * p.r) continue;
 
     // Hit!
-    const dmg = p.type === "flame" ? p.damage + 1 : p.damage;
+    var dmg = p.type === "flame" ? p.damage + 1 : p.damage;
     b.hp -= dmg;
     score += 1;
     sfxHit();
@@ -338,7 +403,10 @@ function resolveBlockCollisions(p) {
       score += 5;
       sfxBreak();
       fadingBlocks.push({ x: b.x, y: b.y, w: b.w, h: b.h, color: blockColor(b.maxHp), fade: 1 });
-      if (b.power) spawnDrop(b.x + b.w / 2, b.y + b.h / 2, b.power);
+      // Auto-collect power-up immediately on block break
+      if (b.power) {
+        collectPowerUp(b.power, b.x + b.w / 2, b.y + b.h / 2);
+      }
       blocks.splice(i, 1);
     }
 
@@ -349,28 +417,24 @@ function resolveBlockCollisions(p) {
     if (p.pierce > 0) { p.pierce--; continue; }
 
     // Reflect
-    const dist = Math.sqrt(dist2) || 0.001;
-    const nx = dx / dist, ny = dy / dist;
-    // Push out
+    var dist = Math.sqrt(dist2) || 0.001;
+    var nx = dx / dist, ny = dy / dist;
     p.x = cx + nx * (p.r + 0.5);
     p.y = cy + ny * (p.r + 0.5);
-    // Reflect velocity
-    const dot = p.vx * nx + p.vy * ny;
+    var dot = p.vx * nx + p.vy * ny;
     p.vx -= 2 * dot * nx;
     p.vy -= 2 * dot * ny;
-    return; // one collision per substep
+    return;
   }
 }
 
-function spawnDrop(x, y, kind) {
-  const d = dropPool.get();
-  d.x = x; d.y = y; d.vy = 120; d.kind = kind; d.active = true;
-  drops.push(d);
-}
-
-function collectPowerUp(kind) {
+function collectPowerUp(kind, x, y) {
   score += 10;
   sfxPower();
+  // Floating text popup
+  var label = PW_LABELS[kind] || "Power!";
+  var color = PW_COLORS[kind] || "#fff";
+  spawnFloatingText(x, y, label, color);
   switch (kind) {
     case PW.MULTI:  ballCount++; break;
     case PW.POWER:  nextBuffs.addDamage++; break;
@@ -387,56 +451,55 @@ function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
 // ---- Trajectory preview (raycast) ----
 function trajectoryPreview() {
   if (!aimDir) return [];
-  const pts = [{ x: launchX, y: LAUNCH_Y }];
-  let rx = launchX, ry = LAUNCH_Y;
-  let dx = aimDir.x, dy = aimDir.y;
-  const r = PHOTON_R;
+  var pts = [{ x: launchX, y: LAUNCH_Y }];
+  var rx = launchX, ry = LAUNCH_Y;
+  var ddx = aimDir.x, ddy = aimDir.y;
+  var r = PHOTON_R;
 
-  for (let seg = 0; seg < 2; seg++) {
-    let minT = Infinity, hitNx = 0, hitNy = 0;
+  for (var seg = 0; seg < 2; seg++) {
+    var minT = Infinity, hitNx = 0, hitNy = 0;
 
     // Walls
-    if (dx < 0) { const t = (r - rx) / dx;           if (t > 0 && t < minT) { minT = t; hitNx = 1; hitNy = 0; } }
-    if (dx > 0) { const t = (W - r - rx) / dx;       if (t > 0 && t < minT) { minT = t; hitNx = -1; hitNy = 0; } }
-    if (dy < 0) { const t = (r - ry) / dy;           if (t > 0 && t < minT) { minT = t; hitNx = 0; hitNy = 1; } }
+    if (ddx < 0) { var t = (r - rx) / ddx;           if (t > 0 && t < minT) { minT = t; hitNx = 1; hitNy = 0; } }
+    if (ddx > 0) { var t = (W - r - rx) / ddx;       if (t > 0 && t < minT) { minT = t; hitNx = -1; hitNy = 0; } }
+    if (ddy < 0) { var t = (r - ry) / ddy;           if (t > 0 && t < minT) { minT = t; hitNx = 0; hitNy = 1; } }
 
     // Blocks (ray vs inflated AABB)
-    for (const b of blocks) {
+    for (var j = 0; j < blocks.length; j++) {
+      var b = blocks[j];
       if (!b.alive) continue;
-      const t = rayAABB(rx, ry, dx, dy, b.x - r, b.y - r, b.x + b.w + r, b.y + b.h + r);
+      var t = rayAABB(rx, ry, ddx, ddy, b.x - r, b.y - r, b.x + b.w + r, b.y + b.h + r);
       if (t !== null && t > 0.1 && t < minT) {
         minT = t;
-        // Determine normal
-        const hx = rx + dx * t, hy = ry + dy * t;
-        const bcx = b.x + b.w / 2, bcy = b.y + b.h / 2;
-        const ex = b.w / 2 + r, ey = b.h / 2 + r;
-        const px = (hx - bcx) / ex, py = (hy - bcy) / ey;
+        var hx = rx + ddx * t, hy = ry + ddy * t;
+        var bcx = b.x + b.w / 2, bcy = b.y + b.h / 2;
+        var ex = b.w / 2 + r, ey = b.h / 2 + r;
+        var px = (hx - bcx) / ex, py = (hy - bcy) / ey;
         if (Math.abs(px) > Math.abs(py)) { hitNx = px > 0 ? 1 : -1; hitNy = 0; }
         else { hitNx = 0; hitNy = py > 0 ? 1 : -1; }
       }
     }
 
     if (minT === Infinity) { minT = 400; }
-    pts.push({ x: rx + dx * minT, y: ry + dy * minT });
-    rx += dx * minT; ry += dy * minT;
-    // Reflect
-    const dot = dx * hitNx + dy * hitNy;
-    dx -= 2 * dot * hitNx;
-    dy -= 2 * dot * hitNy;
+    pts.push({ x: rx + ddx * minT, y: ry + ddy * minT });
+    rx += ddx * minT; ry += ddy * minT;
+    var dot = ddx * hitNx + ddy * hitNy;
+    ddx -= 2 * dot * hitNx;
+    ddy -= 2 * dot * hitNy;
   }
   return pts;
 }
 
 function rayAABB(ox, oy, dx, dy, x0, y0, x1, y1) {
-  let tmin = -Infinity, tmax = Infinity;
+  var tmin = -Infinity, tmax = Infinity;
   if (dx !== 0) {
-    let t1 = (x0 - ox) / dx, t2 = (x1 - ox) / dx;
-    if (t1 > t2) { const tmp = t1; t1 = t2; t2 = tmp; }
+    var t1 = (x0 - ox) / dx, t2 = (x1 - ox) / dx;
+    if (t1 > t2) { var tmp = t1; t1 = t2; t2 = tmp; }
     tmin = Math.max(tmin, t1); tmax = Math.min(tmax, t2);
   } else if (ox < x0 || ox > x1) return null;
   if (dy !== 0) {
-    let t1 = (y0 - oy) / dy, t2 = (y1 - oy) / dy;
-    if (t1 > t2) { const tmp = t1; t1 = t2; t2 = tmp; }
+    var t1 = (y0 - oy) / dy, t2 = (y1 - oy) / dy;
+    if (t1 > t2) { var tmp = t1; t1 = t2; t2 = tmp; }
     tmin = Math.max(tmin, t1); tmax = Math.min(tmax, t2);
   } else if (oy < y0 || oy > y1) return null;
   if (tmin > tmax || tmax < 0) return null;
@@ -453,52 +516,58 @@ function render() {
   ctx.fillRect(0, 0, W, H);
 
   // Fading blocks
-  for (const fb of fadingBlocks) {
+  for (var i = 0; i < fadingBlocks.length; i++) {
+    var fb = fadingBlocks[i];
     ctx.globalAlpha = fb.fade * 0.5;
     drawRoundRect(fb.x, fb.y, fb.w, fb.h, 4, fb.color);
     ctx.globalAlpha = 1;
   }
 
   // Blocks
-  for (const b of blocks) {
+  for (var i = 0; i < blocks.length; i++) {
+    var b = blocks[i];
     if (!b.alive) continue;
-    const opacity = 0.5 + 0.5 * (b.hp / b.maxHp);
-    ctx.globalAlpha = opacity;
-    drawRoundRect(b.x, b.y, b.w, b.h, 4, blockColor(b.hp));
-    ctx.globalAlpha = 1;
+    var opacity = 0.5 + 0.5 * (b.hp / b.maxHp);
 
-    // HP text
-    ctx.fillStyle = "#fff";
-    ctx.font = "bold 11px 'Segoe UI', system-ui, sans-serif";
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    ctx.fillText(b.hp, b.x + b.w / 2, b.y + b.h / 2);
-
-    // Power-up indicator
     if (b.power) {
-      ctx.fillStyle = PW_COLORS[b.power];
-      ctx.beginPath();
-      ctx.arc(b.x + b.w - 5, b.y + 5, 3, 0, Math.PI * 2);
-      ctx.fill();
+      // Power-up blocks: colored pulsing border + icon label
+      var pwColor = PW_COLORS[b.power];
+      // Pulsing glow border
+      ctx.globalAlpha = 0.35 + 0.2 * Math.sin(Date.now() * 0.004);
+      drawRoundRect(b.x - 2, b.y - 2, b.w + 4, b.h + 4, 5, pwColor);
+      // Inner block
+      ctx.globalAlpha = opacity;
+      drawRoundRect(b.x, b.y, b.w, b.h, 4, blockColor(b.hp));
+      ctx.globalAlpha = 1;
+      // Power-up icon on left
+      ctx.fillStyle = pwColor;
+      ctx.font = "bold 7px 'Segoe UI', system-ui, sans-serif";
+      ctx.textAlign = "left";
+      ctx.textBaseline = "middle";
+      ctx.fillText(PW_ICONS[b.power], b.x + 3, b.y + b.h / 2);
+      // HP on right
+      ctx.fillStyle = "#fff";
+      ctx.font = "bold 11px 'Segoe UI', system-ui, sans-serif";
+      ctx.textAlign = "right";
+      ctx.textBaseline = "middle";
+      ctx.fillText(b.hp, b.x + b.w - 4, b.y + b.h / 2);
+    } else {
+      // Normal block
+      ctx.globalAlpha = opacity;
+      drawRoundRect(b.x, b.y, b.w, b.h, 4, blockColor(b.hp));
+      ctx.globalAlpha = 1;
+      // HP text centered
+      ctx.fillStyle = "#fff";
+      ctx.font = "bold 11px 'Segoe UI', system-ui, sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(b.hp, b.x + b.w / 2, b.y + b.h / 2);
     }
   }
 
-  // Drops
-  for (const d of drops) {
-    if (!d.active) continue;
-    ctx.fillStyle = PW_COLORS[d.kind] || "#fff";
-    ctx.beginPath();
-    ctx.arc(d.x, d.y, 8, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = "#fff";
-    ctx.font = "bold 8px sans-serif";
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    ctx.fillText(d.kind, d.x, d.y);
-  }
-
   // Photons
-  for (const p of photons) {
+  for (var i = 0; i < photons.length; i++) {
+    var p = photons[i];
     if (!p.active) continue;
     // Halo
     ctx.globalAlpha = 0.15;
@@ -514,14 +583,26 @@ function render() {
     ctx.fill();
   }
 
-  // Trajectory preview
-  if (phase === AIMING && aiming) {
-    const pts = trajectoryPreview();
+  // Floating text popups
+  for (var i = 0; i < floatingTexts.length; i++) {
+    var ft = floatingTexts[i];
+    ctx.globalAlpha = Math.max(0, ft.life);
+    ctx.fillStyle = ft.color;
+    ctx.font = "bold 13px 'Segoe UI', system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(ft.text, ft.x, ft.y);
+  }
+  ctx.globalAlpha = 1;
+
+  // Trajectory preview – always visible when mouse/touch is above launch point
+  if (phase === AIMING && aiming && aimDir) {
+    var pts = trajectoryPreview();
     ctx.setLineDash([4, 6]);
     ctx.strokeStyle = "rgba(255,255,255,0.35)";
     ctx.lineWidth = 1.5;
     ctx.beginPath();
-    for (let i = 0; i < pts.length; i++) {
+    for (var i = 0; i < pts.length; i++) {
       if (i === 0) ctx.moveTo(pts[i].x, pts[i].y);
       else ctx.lineTo(pts[i].x, pts[i].y);
     }
@@ -549,10 +630,10 @@ function render() {
   ctx.fillText("Balls: " + ballCount, 10, 30);
 
   // Active buffs indicator
-  const buffTexts = [];
-  if (nextBuffs.addDamage > 0) buffTexts.push("+Dmg");
-  if (nextBuffs.big) buffTexts.push("Big");
-  if (nextBuffs.flame) buffTexts.push("Flame");
+  var buffTexts = [];
+  if (nextBuffs.addDamage > 0) buffTexts.push("Power Up");
+  if (nextBuffs.big) buffTexts.push("Big Ball");
+  if (nextBuffs.flame) buffTexts.push("Fire Ball");
   if (nextBuffs.laser) buffTexts.push("Laser");
   if (nextBuffs.pierce > 0) buffTexts.push("Pierce");
   if (nextBuffs.speedMul > 1) buffTexts.push("Speed");
@@ -600,15 +681,14 @@ function drawRoundRect(x, y, w, h, r, color) {
 }
 
 // ---- Main loop ----
-let lastTime = 0, accumulator = 0;
+var lastTime = 0, accumulator = 0;
 
 function loop(timestamp) {
   requestAnimationFrame(loop);
-  let dt = (timestamp - lastTime) / 1000;
+  var dt = (timestamp - lastTime) / 1000;
   lastTime = timestamp;
-  if (dt > 0.1) dt = 0.1;                       // clamp after tab switch
+  if (dt > 0.1) dt = 0.1;
 
-  // Phase-specific logic
   switch (phase) {
     case FIRING:
       fireTimer += dt;
@@ -616,9 +696,8 @@ function loop(timestamp) {
         spawnPhoton();
         fireQueue--;
         fireTimer -= FIRE_INTERVAL;
-        if (fireQueue <= 0) { phase = SIMULATING; break; }
+        if (fireQueue <= 0) { phase = SIMULATING; nextBuffs = freshBuffs(); break; }
       }
-      // Fall through to simulate active photons
       accumulator += dt;
       while (accumulator >= PHYSICS_DT) { updatePhysics(PHYSICS_DT); accumulator -= PHYSICS_DT; }
       break;
@@ -626,30 +705,28 @@ function loop(timestamp) {
     case SIMULATING:
       accumulator += dt;
       while (accumulator >= PHYSICS_DT) { updatePhysics(PHYSICS_DT); accumulator -= PHYSICS_DT; }
-      // Check if all returned
       if (photonsReturned >= photons.length && photons.length > 0) {
         phase = ROUND_END;
       }
       break;
 
     case ROUND_END:
-      // Clean up photons
-      for (const p of photons) photonPool.release(p);
+      for (var i = 0; i < photons.length; i++) photonPool.release(photons[i]);
       photons.length = 0;
-      // Clean up remaining drops
-      for (const d of drops) dropPool.release(d);
-      drops.length = 0;
-      // Set next launch point
       if (firstReturnX !== null) launchX = firstReturnX;
-      // Reset one-shot buffs (keep Multi permanent via ballCount)
-      nextBuffs = freshBuffs();
-      // Advance
+      // Don't reset nextBuffs here — they apply to the NEXT round's photons
       phase = ADVANCE;
       advanceLevel();
       accumulator = 0;
       break;
 
     default:
+      // Update floating texts even during AIMING
+      for (var i = floatingTexts.length - 1; i >= 0; i--) {
+        floatingTexts[i].y -= dt * 40;
+        floatingTexts[i].life -= dt * 1.2;
+        if (floatingTexts[i].life <= 0) floatingTexts.splice(i, 1);
+      }
       break;
   }
 
