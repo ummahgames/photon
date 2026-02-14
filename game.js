@@ -59,12 +59,27 @@ function randomPowerUp() {
   return PW.MULTI;
 }
 
-// ---- Block color bands (soft pastels) ----
-// Higher contrast block colors – saturated enough for white text to pop
+// ---- Block color bands – vibrant neon palette ----
 const BLOCK_COLORS = [
-  "#4a90d9", "#5cb85c", "#d4a017", "#e07b39",
-  "#d9534f", "#9b59b6", "#2ea8a8", "#8a7060"
+  "#00c6ff", "#00e676", "#ffea00", "#ff9100",
+  "#ff1744", "#d500f9", "#00e5ff", "#ff6d00"
 ];
+// Darker shade of each color for block gradients
+const BLOCK_COLORS_DARK = [
+  "#0088b3", "#009e4f", "#b3a400", "#b36500",
+  "#b3102f", "#9500ae", "#00a1b3", "#b34c00"
+];
+// Glow color (slightly transparent) for block borders
+const BLOCK_GLOW = [
+  "rgba(0,198,255,0.5)", "rgba(0,230,118,0.5)", "rgba(255,234,0,0.5)", "rgba(255,145,0,0.5)",
+  "rgba(255,23,68,0.5)", "rgba(213,0,249,0.5)", "rgba(0,229,255,0.5)", "rgba(255,109,0,0.5)"
+];
+
+// ---- Background stars ----
+const STARS = [];
+for (var _si = 0; _si < 60; _si++) {
+  STARS.push({ x: Math.random() * W, y: Math.random() * H, r: 0.4 + Math.random() * 1.2, a: 0.2 + Math.random() * 0.5, speed: 0.1 + Math.random() * 0.3 });
+}
 
 // ---- Canvas setup ----
 const canvas = document.getElementById("game");
@@ -596,15 +611,36 @@ function render() {
   ctx.save();
   ctx.scale(scale, scale);
 
-  // Background
-  ctx.fillStyle = "#16213e";
+  // Background gradient
+  var bgGrad = ctx.createLinearGradient(0, 0, 0, H);
+  bgGrad.addColorStop(0, "#0a0e27");
+  bgGrad.addColorStop(0.5, "#141852");
+  bgGrad.addColorStop(1, "#0a0e27");
+  ctx.fillStyle = bgGrad;
   ctx.fillRect(0, 0, W, H);
 
-  // Fading blocks
+  // Twinkling stars
+  for (var si = 0; si < STARS.length; si++) {
+    var star = STARS[si];
+    star.a += star.speed * 0.02 * (Math.sin(Date.now() * 0.001 + si) > 0 ? 1 : -1);
+    if (star.a < 0.1) star.a = 0.1;
+    if (star.a > 0.7) star.a = 0.7;
+    ctx.globalAlpha = star.a;
+    ctx.fillStyle = "#fff";
+    ctx.beginPath();
+    ctx.arc(star.x, star.y, star.r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  // Fading blocks (break flash)
   for (var i = 0; i < fadingBlocks.length; i++) {
     var fb = fadingBlocks[i];
-    ctx.globalAlpha = fb.fade * 0.5;
+    ctx.globalAlpha = fb.fade * 0.6;
+    ctx.shadowColor = fb.color;
+    ctx.shadowBlur = 15 * fb.fade;
     drawRoundRect(fb.x, fb.y, fb.w, fb.h, 4, fb.color);
+    ctx.shadowBlur = 0;
     ctx.globalAlpha = 1;
   }
 
@@ -612,44 +648,55 @@ function render() {
   for (var i = 0; i < blocks.length; i++) {
     var b = blocks[i];
     if (!b.alive) continue;
-    var opacity = 0.65 + 0.35 * (b.hp / b.maxHp);
-
+    var colorIdx = (b.hp - 1) % BLOCK_COLORS.length;
+    var bColor = BLOCK_COLORS[colorIdx];
+    var bColorDark = BLOCK_COLORS_DARK[colorIdx];
     if (b.power) {
-      // Power-up blocks: colored pulsing border + icon label
+      // Power-up blocks: neon pulsing glow + icon
       var pwColor = PW_COLORS[b.power];
-      // Pulsing glow border
-      ctx.globalAlpha = 0.35 + 0.2 * Math.sin(Date.now() * 0.004);
-      drawRoundRect(b.x - 2, b.y - 2, b.w + 4, b.h + 4, 5, pwColor);
-      // Inner block
-      ctx.globalAlpha = opacity;
-      drawRoundRect(b.x, b.y, b.w, b.h, 4, blockColor(b.hp));
+      // Outer neon glow
+      ctx.shadowColor = pwColor;
+      ctx.shadowBlur = 10 + 4 * Math.sin(Date.now() * 0.005);
+      ctx.globalAlpha = 0.5 + 0.25 * Math.sin(Date.now() * 0.004);
+      drawRoundRect(b.x - 1, b.y - 1, b.w + 2, b.h + 2, 5, pwColor);
+      ctx.shadowBlur = 0;
+      // Inner block with gradient
       ctx.globalAlpha = 1;
+      drawBlockGradient(b.x, b.y, b.w, b.h, 4, bColor, bColorDark);
       // Power-up icon on left
       ctx.fillStyle = pwColor;
       ctx.font = "bold 7px 'Segoe UI', system-ui, sans-serif";
       ctx.textAlign = "left";
       ctx.textBaseline = "middle";
       ctx.fillText(PW_ICONS[b.power], b.x + 3, b.y + b.h / 2);
-      // HP on right – with dark outline for readability
+      // HP on right – high contrast outline
       ctx.font = "bold 12px 'Segoe UI', system-ui, sans-serif";
       ctx.textAlign = "right";
       ctx.textBaseline = "middle";
-      ctx.strokeStyle = "rgba(0,0,0,0.5)";
-      ctx.lineWidth = 2.5;
+      ctx.strokeStyle = "rgba(0,0,0,0.7)";
+      ctx.lineWidth = 3;
       ctx.strokeText(b.hp, b.x + b.w - 4, b.y + b.h / 2);
       ctx.fillStyle = "#fff";
       ctx.fillText(b.hp, b.x + b.w - 4, b.y + b.h / 2);
     } else {
-      // Normal block
-      ctx.globalAlpha = opacity;
-      drawRoundRect(b.x, b.y, b.w, b.h, 4, blockColor(b.hp));
+      // Normal block — subtle glow border
+      ctx.shadowColor = bColor;
+      ctx.shadowBlur = 5;
       ctx.globalAlpha = 1;
-      // HP text centered – with dark outline for readability
+      drawBlockGradient(b.x, b.y, b.w, b.h, 4, bColor, bColorDark);
+      ctx.shadowBlur = 0;
+      // Bright top-edge highlight
+      ctx.globalAlpha = 0.25;
+      ctx.fillStyle = "#fff";
+      roundRectPath(b.x + 1, b.y + 1, b.w - 2, 2, 2);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+      // HP text centered – high contrast outline
       ctx.font = "bold 12px 'Segoe UI', system-ui, sans-serif";
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
-      ctx.strokeStyle = "rgba(0,0,0,0.5)";
-      ctx.lineWidth = 2.5;
+      ctx.strokeStyle = "rgba(0,0,0,0.7)";
+      ctx.lineWidth = 3;
       ctx.strokeText(b.hp, b.x + b.w / 2, b.y + b.h / 2);
       ctx.fillStyle = "#fff";
       ctx.fillText(b.hp, b.x + b.w / 2, b.y + b.h / 2);
@@ -660,18 +707,29 @@ function render() {
   for (var i = 0; i < photons.length; i++) {
     var p = photons[i];
     if (!p.active) continue;
+    var isFlame = p.type === "flame";
+    // Outer glow (canvas shadow)
+    ctx.shadowColor = isFlame ? "#ff1744" : "#00c6ff";
+    ctx.shadowBlur = 12;
     // Halo
-    ctx.globalAlpha = 0.15;
-    ctx.fillStyle = p.type === "flame" ? "#fc5c65" : "#b8e6ff";
+    ctx.globalAlpha = 0.2;
+    ctx.fillStyle = isFlame ? "#ff1744" : "#00c6ff";
     ctx.beginPath();
-    ctx.arc(p.x, p.y, p.r * 2.5, 0, Math.PI * 2);
+    ctx.arc(p.x, p.y, p.r * 2.8, 0, Math.PI * 2);
+    ctx.fill();
+    // Mid glow
+    ctx.globalAlpha = 0.5;
+    ctx.fillStyle = isFlame ? "#ff5252" : "#4dd0e1";
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.r * 1.6, 0, Math.PI * 2);
     ctx.fill();
     // Core
     ctx.globalAlpha = 1;
-    ctx.fillStyle = p.type === "flame" ? "#ff7675" : "#e8f8ff";
+    ctx.fillStyle = isFlame ? "#ffcdd2" : "#e0f7fa";
     ctx.beginPath();
     ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
     ctx.fill();
+    ctx.shadowBlur = 0;
   }
 
   // Laser beam (solid red line that fades out)
@@ -717,11 +775,17 @@ function render() {
   for (var i = 0; i < floatingTexts.length; i++) {
     var ft = floatingTexts[i];
     ctx.globalAlpha = Math.max(0, ft.life);
+    ctx.shadowColor = ft.color;
+    ctx.shadowBlur = 8;
     ctx.fillStyle = ft.color;
-    ctx.font = "bold 13px 'Segoe UI', system-ui, sans-serif";
+    ctx.font = "bold 14px 'Segoe UI', system-ui, sans-serif";
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
+    ctx.strokeStyle = "rgba(0,0,0,0.6)";
+    ctx.lineWidth = 2;
+    ctx.strokeText(ft.text, ft.x, ft.y);
     ctx.fillText(ft.text, ft.x, ft.y);
+    ctx.shadowBlur = 0;
   }
   ctx.globalAlpha = 1;
 
@@ -729,8 +793,10 @@ function render() {
   if (phase === AIMING && aiming && aimDir) {
     var pts = trajectoryPreview();
     ctx.setLineDash([4, 6]);
-    ctx.strokeStyle = "rgba(255,255,255,0.35)";
+    ctx.strokeStyle = "rgba(0,198,255,0.5)";
     ctx.lineWidth = 1.5;
+    ctx.shadowColor = "#00c6ff";
+    ctx.shadowBlur = 4;
     ctx.beginPath();
     for (var i = 0; i < pts.length; i++) {
       if (i === 0) ctx.moveTo(pts[i].x, pts[i].y);
@@ -738,18 +804,24 @@ function render() {
     }
     ctx.stroke();
     ctx.setLineDash([]);
+    ctx.shadowBlur = 0;
   }
 
   // Launch point indicator
   if (phase === AIMING || phase === FIRING || phase === SIMULATING) {
-    ctx.fillStyle = "rgba(255,255,255,0.5)";
+    ctx.shadowColor = "#00c6ff";
+    ctx.shadowBlur = 8;
+    ctx.fillStyle = "rgba(0,198,255,0.8)";
     ctx.beginPath();
     ctx.arc(launchX, LAUNCH_Y, 4, 0, Math.PI * 2);
     ctx.fill();
+    ctx.shadowBlur = 0;
   }
 
   // HUD
-  ctx.fillStyle = "rgba(255,255,255,0.75)";
+  ctx.shadowColor = "#00c6ff";
+  ctx.shadowBlur = 3;
+  ctx.fillStyle = "rgba(200,230,255,0.85)";
   ctx.font = "bold 14px 'Segoe UI', system-ui, sans-serif";
   ctx.textAlign = "left";
   ctx.textBaseline = "top";
@@ -758,6 +830,7 @@ function render() {
   ctx.fillText("Level " + level, W - 10, 10);
   ctx.textAlign = "left";
   ctx.fillText("Balls: " + ballCount, 10, 30);
+  ctx.shadowBlur = 0;
 
   // Persistent upgrades line
   var permTexts = [];
@@ -785,18 +858,22 @@ function render() {
 
   // Game over overlay
   if (phase === GAME_OVER) {
-    ctx.fillStyle = "rgba(0,0,0,0.65)";
+    ctx.fillStyle = "rgba(0,0,0,0.7)";
     ctx.fillRect(0, 0, W, H);
+    ctx.shadowColor = "#ff1744";
+    ctx.shadowBlur = 15;
     ctx.fillStyle = "#fff";
     ctx.font = "bold 28px 'Segoe UI', system-ui, sans-serif";
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     ctx.fillText("Game Over", W / 2, H / 2 - 40);
+    ctx.shadowBlur = 0;
     ctx.font = "16px sans-serif";
+    ctx.fillStyle = "rgba(200,230,255,0.9)";
     ctx.fillText("Score: " + score, W / 2, H / 2);
     ctx.fillText("Level: " + level, W / 2, H / 2 + 28);
     ctx.font = "13px sans-serif";
-    ctx.fillStyle = "rgba(255,255,255,0.6)";
+    ctx.fillStyle = "rgba(0,198,255,0.7)";
     ctx.fillText("Tap to play again", W / 2, H / 2 + 64);
   }
 
@@ -816,6 +893,29 @@ function drawRoundRect(x, y, w, h, r, color) {
   ctx.lineTo(x, y + r);
   ctx.quadraticCurveTo(x, y, x + r, y);
   ctx.closePath();
+  ctx.fill();
+}
+
+function roundRectPath(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+}
+
+function drawBlockGradient(x, y, w, h, r, topColor, botColor) {
+  var grad = ctx.createLinearGradient(x, y, x, y + h);
+  grad.addColorStop(0, topColor);
+  grad.addColorStop(1, botColor);
+  ctx.fillStyle = grad;
+  roundRectPath(x, y, w, h, r);
   ctx.fill();
 }
 
